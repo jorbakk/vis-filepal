@@ -174,6 +174,19 @@ vis:command_register("fl", function(_argv, _force, win, _selection, _range)
 end)
 
 
+vis:command_register("fs", function(argv, _force, win, _selection, _range)
+	local sql = string.format([[
+	  select path
+	  from file
+	  where path <> '%s' and path like '%%%s%%'
+	  order by time desc
+	  limit %d
+	]], win.file.path, argv[1], M.history)
+	show_file_list(sql)
+	return true;
+end)
+
+
 vis.events.subscribe(vis.events.INIT, on_init)
 vis.events.subscribe(vis.events.FILE_OPEN, on_file_open)
 vis.events.subscribe(vis.events.WIN_OPEN, on_win_open)

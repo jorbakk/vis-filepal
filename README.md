@@ -5,6 +5,7 @@ Filepal helps with managing everything related to file buffers and paths in [vis
 - Remember the cursor position for each file that has been opened. Cursor positions are updated on window open and close events, and not when quitting vis, so they are already available during a running vis session (and for all vis instances).
 - Provide a local and global file history. The global file history shows all the files that were most recently used by one user up to `history` count files. The local history does the same for files opened in the current instance of vis. The file history is shown using `vis-menu` by default. For configurable parameters, see [Configuration](#configuration) below.
 - Show a warning message, if a file is already open in another instance of vis.
+- Make a substring-search in all files that have been opened so far
 
 ## Usage
 
@@ -13,6 +14,8 @@ In vis:
 `:ff` shows global file history
 
 `:fl` shows local file history
+
+`:fs <search_string>` search in global file history
 
 ## Requirements
 
