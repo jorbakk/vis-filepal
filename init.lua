@@ -147,20 +147,28 @@ local function show_file_list(sql)
 end
 
 
-vis:command_register("ff", function(_argv, _force, _win, _selection, _range)
+vis:command_register("ff", function(_argv, _force, win, _selection, _range)
 	local sql = string.format([[
-	  select path from file order by time desc limit %d
-	]], M.history)
+	  select path
+	  from file
+	  where path <> '%s'
+	  order by time desc
+	  limit %d
+	]], win.file.path, M.history)
 	show_file_list(sql)
 	return true;
 end)
 
 
-vis:command_register("fl", function(_argv, _force, _win, _selection, _range)
+vis:command_register("fl", function(_argv, _force, win, _selection, _range)
 	local pid = get_pid()
 	local sql = string.format([[
-	  select path from file where pid = %d order by time desc limit %d
-	]], pid, M.history)
+	  select path
+	  from file
+	  where pid = %d and path <> '%s'
+	  order by time desc
+	  limit %d
+	]], pid, win.file.path, M.history)
 	show_file_list(sql)
 	return true;
 end)
