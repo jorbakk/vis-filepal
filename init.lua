@@ -16,14 +16,6 @@ M.vis_menu_args = "-l 10"
 M.history = 100
 
 
-local on_init = function()
-	db = sqlite3.open(M.dbpath)
-	db:exec([[
-	  create table if not exists file (path, time, curpos, line, col, vppos, pid)
-	]])
-end
-
-
 local function get_pid()
 	local proc = io.open("/proc/self/stat", "r")
 	local pid = proc:read("n")
@@ -39,6 +31,19 @@ local is_file_ignored = function(path)
 		end
 	end
 	return false
+end
+
+
+local on_init = function()
+	db = sqlite3.open(M.dbpath)
+	db:exec([[
+	  create table if not exists file (path, time, curpos, line, col, vppos, pid)
+	]])
+	db:exec([[
+	  create index if not exists path_idx on file (path);
+	  create index if not exists time_idx on file (time);
+	  create index if not exists pid_idx  on file (pid);
+	]])
 end
 
 
