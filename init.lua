@@ -4,6 +4,8 @@
 
 local M = {}
 local db
+local STATUS_OPEN   = "open"
+local STATUS_CLOSED = "closed"
 
 local sqlite3 = require("lsqlite3complete")
 M.dbpath = os.getenv("HOME") .. "/.vis.db"
@@ -24,7 +26,7 @@ local function get_pid()
 end
 
 
-local is_file_ignored = function(path)
+local function is_file_ignored(path)
 	for _, pattern in pairs(M.ignore) do
 		if path:match(pattern) then
 			return true
@@ -34,113 +36,177 @@ local is_file_ignored = function(path)
 end
 
 
-local on_init = function()
+local function on_init()
 	db = sqlite3.open(M.dbpath)
 	db:exec([[
-	  create table if not exists file (path, time, curpos, line, col, vppos, pid)
+	  create table if not exists file
+	  (idx integer, path text, time integer, curpos integer, line integer,
+	   col integer, vppos integer)
 	]])
 	db:exec([[
+	  create index if not exists fidx_idx on file (idx);
 	  create index if not exists path_idx on file (path);
 	  create index if not exists time_idx on file (time);
-	  create index if not exists pid_idx  on file (pid);
+	]])
+	db:exec([[
+	  create table if not exists proc
+	  (idx integer, pid integer, status text)
+	]])
+	db:exec([[
+	  create index if not exists pidx_idx on proc (idx);
+	  create index if not exists pid_idx  on proc (pid);
 	]])
 end
 
 
-local on_quit = function()
+local function on_quit()
 	local pid = get_pid()
 	local sql = string.format([[
-	  update file set pid = 0 where pid = %d
+	  delete from proc where pid = %d
 	]], pid)
 	db:exec(sql)
 	db:close()
 end
 
 
-local function update(win)
-	local pid = get_pid()
+--- Returning true in update() means that nothing is done afterwards, i.e. no insert
+--- of a new entry in the file table.
+local function update(win, status)
+	local ret = false
+
 	local sql = string.format([[
 	  update file
-	  set time = %d, curpos = %d, line = %d, col = %d, vppos = %d, pid = %d
+	  set time = %d, curpos = %d, line = %d, col = %d, vppos = %d
 	  where path = '%s'
 	]],
 	  os.time(),
 	  win.selection.pos,
 	  win.selection.line, win.selection.col,
-	  win.viewport.bytes.start, pid,
+	  win.viewport.bytes.start,
 	  win.file.path)
-	db:exec(sql)
-	return db:changes() > 0
+	--- Do nothing, if the statement fails e.g. of database being locked, the entries
+	--- for one file would pile up. I could check for different error conditions ...
+	if db:exec(sql) ~= sqlite3.OK then return true end
+
+	if db:changes() > 0 then
+		local pid = get_pid()
+		--- Check if file is open in more than one window then stop here and do nothing
+		local wcnt = 0
+		for w in vis:windows() do
+			if w.file.path == win.file.path then wcnt = wcnt + 1 end
+		end
+		if wcnt > 1 then return true end
+		sql = string.format([[
+		  update proc as p
+		  set status = '%s'
+		  from file as f
+		  where f.idx = p.idx and p.pid = %d and f.path = '%s'
+		]],
+		  status, pid, win.file.path)
+		if db:exec(sql) ~= sqlite3.OK then return true end
+		if db:changes() > 0 then return true
+		else
+			sql = string.format([[
+			  insert into proc (idx, pid, status)
+			  select f.idx, %d, '%s'
+			  from file as f
+			  where f.path = '%s'
+			]],
+			  pid, status,
+			  win.file.path)
+			if db:exec(sql) ~= sqlite3.OK then return true end
+			if db:changes() > 0 then return true end
+		end
+	end
+	return ret
 end
 
 
-local function insert(win)
-	local pid = get_pid()
+local function insert(win, status)
+	local idx
 	local sql = string.format([[
-	  insert into file (path, time, curpos, line, col, vppos, pid)
-	  values ('%s', %d, %d, %d, %d, %d, %d)
-	]],
-	  win.file.path, os.time(),
-	  win.selection.pos,
-	  win.selection.line, win.selection.col,
-	  win.viewport.bytes.start, pid)
-	db:exec(sql)
-end
-
-
-local on_file_open = function(file)
-	local pid = get_pid()
-	local sql = string.format([[
-	  select pid from file where path = '%s'
-	]], file.path)
-	local iter, state, initial = db:urows(sql)
-	local file_pid = iter(state, initial)
-	if file_pid ~= nil and file_pid > 0 and file_pid ~= pid then
-		vis:info(string.format("file '%s' already open in vis instance with pid: %d",
-		  file.path, file_pid))
-	end
-end
-
-
-local on_win_open = function(win)
-	if win.file == nil or win.file.path == nil then
-		return
-	end
-	if is_file_ignored(win.file.path) then
-		return
-	end
-	local sql = string.format([[
-	  select curpos, vppos, pid from file where path = '%s'
+	  select idx from file order by idx desc limit 1
 	]], win.file.path)
-	local iter, state, initial = db:urows(sql)
-	local curpos, _, _ = iter(state, initial)
-	if curpos == nil then
-		insert(win)
-	else
-		win.selection.pos = curpos
-		vis:feedkeys("zz")
-		update(win)
+	for i in db:urows(sql) do idx = i + 1 end
+
+	sql = string.format([[
+	  insert into file (idx, path, time, curpos, line, col, vppos)
+	  values (%d, '%s', %d, %d, %d, %d, %d)
+	]],
+	  idx,
+	  win.file.path,
+	  os.time(),
+	  win.selection.pos,
+	  win.selection.line,
+	  win.selection.col,
+	  win.viewport.bytes.start)
+	db:exec(sql)
+
+	local pid = get_pid()
+	sql = string.format([[
+	  insert into proc (idx, pid, status)
+	  values (%d, %d, '%s')
+	]], idx, pid, status)
+	db:exec(sql)
+end
+
+
+local function check_file_path(win)
+	if win.file == nil or win.file.path == nil then
+		return false
+	end
+	if is_file_ignored(win.file.path) then
+		return false
+	end
+	return true
+end
+
+
+local function on_win_open(win)
+	if not check_file_path(win) then return end
+
+	local pid = get_pid()
+	local sql = string.format([[
+	  select p.pid, p.status
+	  from file as f, proc as p
+	  where f.idx = p.idx and f.path = '%s' and p.pid <> %d
+	  order by f.time desc limit 1
+	]], win.file.path, pid)
+	for file_pid, file_status in db:urows(sql) do
+		if file_pid ~= nil and file_pid > 0 and file_status == STATUS_OPEN then
+			vis:info(string.format("file '%s' already open in vis instance with pid: %d",
+			  win.file.path, file_pid))
+		end
+	end
+
+	sql = string.format([[
+	  select curpos, vppos from file where path = '%s' limit 1
+	]], win.file.path)
+	for curpos, _ in db:urows(sql) do
+		if curpos == nil then
+			insert(win, STATUS_OPEN)
+		else
+			win.selection.pos = curpos
+			vis:feedkeys("zz")
+			update(win, STATUS_OPEN)
+		end
 	end
 end
 
 
-local on_win_close = function(win)
-	if win.file == nil or win.file.path == nil then
-		return
-	end
-	if is_file_ignored(win.file.path) then
-		return
-	end
-	if not update(win) then
-		insert(win)
+local function on_win_close(win)
+	if not check_file_path(win) then return end
+
+	if not update(win, STATUS_CLOSED) then
+		insert(win, STATUS_CLOSED)
 	end
 end
 
 
 local function show_file_list(sql)
 	local file_list = {}
-	for f in db:urows(sql) do
-		table.insert(file_list, f)
+	for fnames in db:urows(sql) do
+		table.insert(file_list, fnames)
 	end
 	local command = M.vis_menu_path .. " " .. M.vis_menu_args
 	local status, output, _ = vis:pipe(table.concat(file_list, '\n'), command)
@@ -154,12 +220,12 @@ end
 
 vis:command_register("ff", function(_argv, _force, win, _selection, _range)
 	local sql = string.format([[
-	  select path
-	  from file
+	  select path from file
 	  where path <> '%s'
 	  order by time desc
 	  limit %d
 	]], win.file.path, M.history)
+
 	show_file_list(sql)
 	return true;
 end)
@@ -167,13 +233,14 @@ end)
 
 vis:command_register("fl", function(_argv, _force, win, _selection, _range)
 	local pid = get_pid()
+
 	local sql = string.format([[
-	  select path
-	  from file
-	  where pid = %d and path <> '%s'
+	  select path from file as f, proc as p
+	  where f.idx = p.idx and p.pid = %d and f.path <> '%s'
 	  order by time desc
 	  limit %d
 	]], pid, win.file.path, M.history)
+
 	show_file_list(sql)
 	return true;
 end)
@@ -181,22 +248,27 @@ end)
 
 vis:command_register("fs", function(argv, _force, win, _selection, _range)
 	local sql = string.format([[
-	  select path
-	  from file
+	  select path from file
 	  where path <> '%s' and path like '%%%s%%'
 	  order by time desc
 	  limit %d
 	]], win.file.path, argv[1], M.history)
+
 	show_file_list(sql)
 	return true;
 end)
 
 
-vis.events.subscribe(vis.events.INIT, on_init)
-vis.events.subscribe(vis.events.FILE_OPEN, on_file_open)
-vis.events.subscribe(vis.events.WIN_OPEN, on_win_open)
-vis.events.subscribe(vis.events.WIN_CLOSE, on_win_close)
-vis.events.subscribe(vis.events.QUIT, on_quit)
+--- win open / close events are triggered on file changes,
+--- even if the window doesn't change. The only situation
+--- when file events and win events aren't triggered pair-wise
+--- is, when there is more than one window with the same file
+--- open in the same vis process.
+
+vis.events.subscribe(vis.events.INIT,       on_init)
+vis.events.subscribe(vis.events.WIN_OPEN,   on_win_open)
+vis.events.subscribe(vis.events.WIN_CLOSE,  on_win_close)
+vis.events.subscribe(vis.events.QUIT,       on_quit)
 
 return M
 
